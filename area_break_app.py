@@ -1,289 +1,272 @@
 """
-AREA BREAK - address parser for collections portfolios
-=====================================================
-Upload a file with an ADDRESS column, get AREA / MUNICIPALITY / FINAL AREA /
-ZIP CODE filled in, plus an audit trail showing how every row was resolved.
+Area Break - address column -> AREA / MUNICIPALITY / FINAL AREA / ZIP CODE
+==========================================================================
 
-Run:  streamlit run area_break_app.py
-Needs: streamlit, pandas, openpyxl, xlsxwriter   (python-calamine optional, faster reads)
-Keep ph_zip_reference.csv in the same folder as this file.
+The interface is a React + Tailwind component (frontend/dist, pre-built, so
+no Node is needed to run it). This script is the back end: it receives events
+from the component, runs area_engine, and sends back what the page shows.
+
+    streamlit run area_break_app.py
+
+Front-end development (only if you change the React code):
+    cd frontend && npm install && npm run dev
+    set AREA_BREAK_DEV=http://localhost:5173   (Windows)   then run Streamlit
 """
 
 from __future__ import annotations
 
+import base64
 import io
+import os
 import time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from area_engine import (
     AREA_MODES,
-    FINAL_AREA_MODES,
     DEFAULT_REFERENCE,
+    FINAL_AREA_MODES,
     Reference,
     break_addresses,
 )
 
+HERE = Path(__file__).resolve().parent
+DIST = HERE / "frontend" / "dist"
+DEV_URL = os.environ.get("AREA_BREAK_DEV")
+
 OUTPUT_COLS = ["AREA", "MUNICIPALITY", "FINAL AREA", "ZIP CODE"]
 AUDIT_COL = "MATCH SOURCE"
+RESOLVED_SOURCES = {"ZIP", "TEXT-MUNICIPALITY", "TEXT-PROVINCE"}
+PAGE_ROWS = 25
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-st.set_page_config(page_title="Area Break", page_icon="◧", layout="wide")
+_ISLAND, _NCR_CITY, _NCR_PROV, _REGION, _PROVINCE = list(FINAL_AREA_MODES)
+
+OPTIONS = {
+    "areaModes": [
+        {"value": "Province", "label": "Province"},
+        {"value": "Administrative region", "label": "Region"},
+        {"value": "Island group", "label": "Island group"},
+    ],
+    "finalModes": [
+        {"value": _ISLAND, "label": "Island group", "example": "NCR · NORTH LUZON · SOUTH LUZON · VISAYAS · MINDANAO"},
+        {"value": _NCR_CITY, "label": "NCR city, else province", "example": "MAKATI · QUEZON CITY · CAVITE"},
+        {"value": _NCR_PROV, "label": "NCR or provincial", "example": "NCR · PROVINCIAL"},
+        {"value": _REGION, "label": "Region", "example": "NCR · REGION III · REGION IV-A"},
+        {"value": _PROVINCE, "label": "Province", "example": "METRO MANILA · BULACAN · RIZAL"},
+    ],
+}
+DEFAULT_RULES = {"areaMode": "Province", "finalMode": _ISLAND, "fallback": True}
+_LABEL = {o["value"]: o["label"] for o in OPTIONS["areaModes"] + OPTIONS["finalModes"]}
+
+if DEV_URL:
+    _ui = components.declare_component("area_break_ui", url=DEV_URL)
+else:
+    if not (DIST / "index.html").exists():
+        raise SystemExit("frontend/dist is missing. Run `npm install && npm run build` in frontend/.")
+    _ui = components.declare_component("area_break_ui", path=str(DIST))
+
 
 # --------------------------------------------------------------------------
-# styling - quiet slate shell, one signal colour on the coverage readout
+# page shell: hide Streamlit's own chrome so the component is the whole page
 # --------------------------------------------------------------------------
+st.set_page_config(page_title="Area Break", page_icon=str(HERE / "favicon.png"), layout="wide")
 st.markdown(
     """
     <style>
-      .stApp { background:#0f1620; }
-      section[data-testid="stSidebar"] { background:#141d29; border-right:1px solid #22303f; }
-      h1,h2,h3,h4,p,label,span,div { color:#dbe4ee; }
-      .ab-title { font-size:2.05rem; font-weight:700; letter-spacing:-.02em; margin:0; color:#f2f6fa; }
-      .ab-sub { color:#7d8fa3; font-size:.9rem; margin:.15rem 0 1.4rem; }
-      .ab-card { background:#141d29; border:1px solid #22303f; border-radius:10px;
-                 padding:1rem 1.15rem; margin-bottom:.7rem; }
-      .ab-kpi { font-size:1.7rem; font-weight:700; color:#f2f6fa; line-height:1.1; }
-      .ab-lab { font-size:.72rem; letter-spacing:.09em; text-transform:uppercase; color:#7d8fa3; }
-      .ab-bar { height:9px; border-radius:5px; background:#22303f; overflow:hidden; margin-top:.55rem; }
-      .ab-bar > i { display:block; height:100%; background:#3ddc97; }
-      .ab-warn { color:#f2b544; }
-      .stButton>button, .stDownloadButton>button {
-          background:#3ddc97; color:#0f1620; border:0; border-radius:7px;
-          font-weight:650; padding:.5rem 1.15rem; }
-      .stButton>button:hover, .stDownloadButton>button:hover { background:#57e8a9; color:#0f1620; }
-      div[data-testid="stDataFrame"] { border:1px solid #22303f; border-radius:8px; }
+      header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"],
+      [data-testid="stStatusWidget"], #MainMenu, footer { display: none !important; }
+      .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background: #f3f5f8; }
+      @media (prefers-color-scheme: dark) {
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background: #0e141c; }
+      }
+      .block-container, [data-testid="stMainBlockContainer"] {
+        padding: 0 !important; max-width: 100% !important; }
+      [data-testid="stVerticalBlock"] { gap: 0 !important; }
+      [data-testid="stElementContainer"], .element-container, [data-stale] {
+        opacity: 1 !important; transition: none !important; }
+      iframe { border: 0 !important; display: block; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown('<p class="ab-title">Area Break</p>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="ab-sub">Parses a free-text address column into AREA, MUNICIPALITY, '
-    "FINAL AREA and ZIP CODE. Every row is tagged with how it was resolved.</p>",
-    unsafe_allow_html=True,
-)
+ss = st.session_state
 
 
 # --------------------------------------------------------------------------
 # reference table
 # --------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
-def load_default_reference(mtime: float):
+def bundled_reference(mtime: float) -> Reference:
     return Reference.from_csv(DEFAULT_REFERENCE)
 
 
-@st.cache_data(show_spinner=False)
-def read_reference_df(path: str):
-    return pd.read_csv(path, dtype=str).fillna("")
+def reference_info(ref: Reference, name: str | None) -> dict:
+    return {
+        "zips": len(ref.by_zip),
+        "provinces": len({r["PROVINCE"] for r in ref.by_zip.values()}),
+        "custom": name is not None,
+        "name": name or "Bundled table",
+    }
 
 
-with st.sidebar:
-    st.markdown('<p class="ab-lab">Reference table</p>', unsafe_allow_html=True)
-
-    ref_upload = st.file_uploader(
-        "Custom ZIP reference (optional)",
-        type=["csv"],
-        help="Columns: ZIP CODE, MUNICIPALITY, PROVINCE, REGION, ISLAND GROUP. "
-             "Replaces the bundled table entirely.",
-    )
-
-    if ref_upload is not None:
-        reference = Reference.from_csv(ref_upload)
-        st.success(f"Custom table loaded — {len(reference.by_zip):,} ZIP codes")
-    else:
-        if not Path(DEFAULT_REFERENCE).exists():
-            st.error("ph_zip_reference.csv is missing. Put it beside this script.")
-            st.stop()
-        reference = load_default_reference(Path(DEFAULT_REFERENCE).stat().st_mtime)
-        st.caption(f"Bundled table — {len(reference.by_zip):,} ZIP codes, "
-                   f"{len({r['PROVINCE'] for r in reference.by_zip.values()})} provinces")
-
-    st.divider()
-    st.markdown('<p class="ab-lab">Output rules</p>', unsafe_allow_html=True)
-
-    area_mode = st.selectbox("AREA column", list(AREA_MODES), index=0)
-    final_mode = st.selectbox("FINAL AREA column", list(FINAL_AREA_MODES), index=0)
-
-    st.divider()
-    st.markdown('<p class="ab-lab">Matching</p>', unsafe_allow_html=True)
-    use_fallback = st.checkbox(
-        "Scan address text when the ZIP fails",
-        value=True,
-        help="If no ZIP is found — or the ZIP is not in the reference — look for a "
-             "known municipality or province name inside the address string.",
-    )
-    keep_source_zip = st.checkbox(
-        "Keep the ZIP as written in the address",
-        value=True,
-        help="Off: use the reference table's ZIP for the matched municipality instead.",
-    )
-
-    st.divider()
-    with st.expander("Reference table preview"):
-        if ref_upload is None:
-            st.dataframe(read_reference_df(str(DEFAULT_REFERENCE)).head(300),
-                         use_container_width=True, height=280)
-            st.download_button(
-                "Download reference CSV",
-                Path(DEFAULT_REFERENCE).read_bytes(),
-                file_name="ph_zip_reference.csv",
-                mime="text/csv",
-            )
-        else:
-            st.caption("Showing your uploaded table.")
+def current_reference() -> Reference:
+    if ss.get("ref_custom") is not None:
+        return ss.ref_custom
+    return bundled_reference(DEFAULT_REFERENCE.stat().st_mtime)
 
 
 # --------------------------------------------------------------------------
-# file input
+# reading files
 # --------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def read_source(data: bytes, name: str, sheet: str | None):
-    buf = io.BytesIO(data)
-    if name.lower().endswith((".csv", ".txt")):
-        return pd.read_csv(buf, dtype=str, keep_default_na=False, na_values=[""])
-    try:
-        return pd.read_excel(buf, sheet_name=sheet or 0, dtype=str, engine="calamine")
-    except Exception:
-        buf.seek(0)
-        return pd.read_excel(buf, sheet_name=sheet or 0, dtype=str)
-
-
-@st.cache_data(show_spinner=False)
-def sheet_names(data: bytes, name: str):
+def sheet_names(data: bytes, name: str) -> list[str]:
     if name.lower().endswith((".csv", ".txt")):
         return []
-    return pd.ExcelFile(io.BytesIO(data)).sheet_names
+    try:
+        return pd.ExcelFile(io.BytesIO(data), engine="calamine").sheet_names
+    except Exception:
+        return pd.ExcelFile(io.BytesIO(data)).sheet_names
 
 
-uploaded = st.file_uploader("Source file", type=["xlsx", "xlsm", "xls", "csv"])
+def read_table(data: bytes, name: str, sheet: str | None) -> pd.DataFrame:
+    if name.lower().endswith((".csv", ".txt")):
+        for enc in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                return pd.read_csv(io.BytesIO(data), dtype=str, encoding=enc, keep_default_na=False, na_values=[""])
+            except UnicodeDecodeError:
+                continue
+    try:
+        df = pd.read_excel(io.BytesIO(data), sheet_name=sheet or 0, dtype=str, engine="calamine")
+    except Exception:
+        df = pd.read_excel(io.BytesIO(data), sheet_name=sheet or 0, dtype=str)
+    return df
 
-if uploaded is None:
-    st.info("Upload the file with the address column to begin.")
-    st.stop()
 
-raw = uploaded.getvalue()
-sheets = sheet_names(raw, uploaded.name)
-sheet = st.selectbox("Sheet", sheets) if len(sheets) > 1 else (sheets[0] if sheets else None)
+def load_frame(sheet: str | None):
+    df = read_table(ss.raw, ss.fname, sheet)
+    df.columns = [str(c).strip() for c in df.columns]
+    ss.df = df
+    ss.sheet = sheet
+    ss.addr_col = next((c for c in df.columns if "ADDRESS" in c.upper()), df.columns[0])
+    ss.result = None
 
-with st.spinner("Reading file…"):
-    df = read_source(raw, uploaded.name, sheet)
 
-df.columns = [str(c).strip() for c in df.columns]
-
-# --- address column: guess, let the user correct -------------------------
-guess = next((c for c in df.columns if "ADDRESS" in c.upper()), df.columns[0])
-addr_col = st.selectbox(
-    "Address column", list(df.columns), index=list(df.columns).index(guess)
-)
-
-c1, c2, c3 = st.columns(3)
-c1.markdown(f'<div class="ab-card"><div class="ab-lab">Rows</div>'
-            f'<div class="ab-kpi">{len(df):,}</div></div>', unsafe_allow_html=True)
-c2.markdown(f'<div class="ab-card"><div class="ab-lab">Columns</div>'
-            f'<div class="ab-kpi">{len(df.columns)}</div></div>', unsafe_allow_html=True)
-c3.markdown(f'<div class="ab-card"><div class="ab-lab">Blank addresses</div>'
-            f'<div class="ab-kpi">{int(df[addr_col].isna().sum()):,}</div></div>',
-            unsafe_allow_html=True)
-
-with st.expander("Preview source"):
-    st.dataframe(df.head(50), use_container_width=True)
-
-if not st.button("Run area break", type="primary"):
-    st.stop()
+def file_state() -> dict | None:
+    if ss.get("df") is None:
+        return None
+    df, col = ss.df, ss.addr_col
+    s = df[col]
+    filled = s.dropna().astype(str).str.strip()
+    filled = filled[filled.ne("")]
+    return {
+        "name": ss.fname,
+        "rows": int(len(df)),
+        "columns": list(df.columns),
+        "sheets": ss.sheets,
+        "sheet": ss.sheet,
+        "addrCol": col,
+        "blanks": int(len(df) - len(filled)),
+        "samples": filled.head(3).tolist(),
+    }
 
 
 # --------------------------------------------------------------------------
-# process
+# running
 # --------------------------------------------------------------------------
-t0 = time.time()
-with st.spinner(f"Breaking {len(df):,} addresses…"):
+def run(rules: dict, nonce: int):
+    df, col = ss.df, ss.addr_col
+    t0 = time.perf_counter()
     broken = pd.DataFrame(
         break_addresses(
-            df[addr_col].tolist(),
-            reference,
-            area_mode=area_mode,
-            final_area_mode=final_mode,
-            use_text_fallback=use_fallback,
-            keep_source_zip=keep_source_zip,
+            df[col].tolist(),
+            current_reference(),
+            area_mode=rules["areaMode"],
+            final_area_mode=rules["finalMode"],
+            use_text_fallback=rules["fallback"],
         ),
         index=df.index,
     )
-elapsed = time.time() - t0
+    elapsed = time.perf_counter() - t0
 
-# Existing AREA / MUNICIPALITY / FINAL AREA / ZIP CODE columns are filled in
-# place so the original column order survives; anything missing is appended.
-out = df.copy()
-for col in OUTPUT_COLS + [AUDIT_COL]:
-    out[col] = broken[col]
+    # existing AREA / MUNICIPALITY / FINAL AREA / ZIP CODE columns are filled
+    # in place (original order kept); missing ones are appended
+    out = df.copy()
+    for c in OUTPUT_COLS + [AUDIT_COL]:
+        out[c] = broken[c]
+    ss.out = out
 
-resolved = broken["MUNICIPALITY"].ne("")
-rate = resolved.mean() if len(broken) else 0.0
+    id_col = next((c for c in df.columns if c != col and c not in OUTPUT_COLS + [AUDIT_COL]), None)
+    ss.id_col = id_col
+    blob = out[col].fillna("")
+    for c in [id_col, "MUNICIPALITY", "AREA", "ZIP CODE"]:
+        if c:
+            blob = blob + " " + out[c].fillna("").astype(str)
+    ss.blob = blob.str.upper()
 
-st.markdown(
-    f'<div class="ab-card"><div class="ab-lab">Resolved</div>'
-    f'<div class="ab-kpi">{resolved.sum():,} / {len(broken):,} '
-    f'<span style="font-size:1rem;color:#3ddc97">{rate:.2%}</span></div>'
-    f'<div class="ab-bar"><i style="width:{rate*100:.2f}%"></i></div>'
-    f'<div class="ab-lab" style="margin-top:.6rem">{elapsed:.1f}s</div></div>',
-    unsafe_allow_html=True,
-)
+    src = broken[AUDIT_COL]
+    resolved = int(src.isin(RESOLVED_SOURCES).sum())
+    counts = lambda s: [{"label": k, "rows": int(v)} for k, v in s.value_counts().items()]  # noqa: E731
+    missing = broken.loc[src.eq("ZIP NOT IN REFERENCE"), "ZIP CODE"].value_counts()
 
-left, right = st.columns([1, 1])
-with left:
-    st.markdown('<p class="ab-lab">How each row matched</p>', unsafe_allow_html=True)
-    st.dataframe(
-        broken[AUDIT_COL].value_counts().rename_axis("source").reset_index(name="rows"),
-        use_container_width=True, hide_index=True,
-    )
-with right:
-    st.markdown('<p class="ab-lab">FINAL AREA breakdown</p>', unsafe_allow_html=True)
-    st.dataframe(
-        broken["FINAL AREA"].replace("", "(unresolved)")
-        .value_counts().rename_axis("final area").reset_index(name="rows"),
-        use_container_width=True, hide_index=True,
-    )
+    ss.result = {
+        "id": nonce,
+        "rows": int(len(df)),
+        "resolved": resolved,
+        "unresolved": int(len(df) - resolved),
+        "rate": resolved / len(df) if len(df) else 0.0,
+        "elapsed": elapsed,
+        "settings": dict(rules),
+        "areaModeLabel": _LABEL[rules["areaMode"]],
+        "finalModeLabel": _LABEL[rules["finalMode"]],
+        "islandMode": rules["finalMode"] == _ISLAND,
+        "sources": [{"key": k, "rows": int(v)} for k, v in src.value_counts().items()],
+        "final": counts(broken["FINAL AREA"]),
+        "area": counts(broken["AREA"]),
+        "review": int(src.ne("ZIP").sum()),
+        "missingZips": [{"zip": k, "rows": int(v)} for k, v in missing.head(40).items()],
+    }
+    query_table({"view": "all", "q": "", "final": "", "source": "", "page": 0})
 
-st.markdown('<p class="ab-lab">AREA breakdown</p>', unsafe_allow_html=True)
-st.dataframe(
-    broken["AREA"].replace("", "(unresolved)")
-    .value_counts().rename_axis("area").reset_index(name="rows"),
-    use_container_width=True, hide_index=True, height=280,
-)
 
-# --- exceptions ----------------------------------------------------------
-exc_mask = ~resolved
-exceptions = out.loc[exc_mask, [addr_col] + OUTPUT_COLS + [AUDIT_COL]]
+def query_table(q: dict):
+    out = ss.out
+    mask = pd.Series(True, index=out.index)
+    if q.get("view") == "review":
+        mask &= out[AUDIT_COL].ne("ZIP")
+    if q.get("final"):
+        mask &= out["FINAL AREA"].eq(q["final"])
+    if q.get("source"):
+        mask &= out[AUDIT_COL].eq(q["source"])
+    text = (q.get("q") or "").strip().upper()
+    if text:
+        mask &= ss.blob.str.contains(text, regex=False, na=False)
 
-if len(exceptions):
-    st.markdown(
-        f'<p class="ab-lab ab-warn">{len(exceptions):,} unresolved — '
-        "add the ZIP to the reference table and re-run</p>",
-        unsafe_allow_html=True,
-    )
-    st.dataframe(exceptions.head(500), use_container_width=True)
-
-    unknown = (
-        broken.loc[broken[AUDIT_COL] == "ZIP NOT IN REFERENCE", "ZIP CODE"]
-        .value_counts().rename_axis("zip code").reset_index(name="rows")
-    )
-    if len(unknown):
-        st.markdown('<p class="ab-lab">ZIP codes missing from the reference</p>',
-                    unsafe_allow_html=True)
-        st.dataframe(unknown, use_container_width=True, hide_index=True)
-else:
-    st.success("Every row resolved.")
-
-st.markdown('<p class="ab-lab">Result preview</p>', unsafe_allow_html=True)
-st.dataframe(out.head(200), use_container_width=True)
+    cols = [c for c in [ss.id_col, ss.addr_col] if c] + OUTPUT_COLS + [AUDIT_COL]
+    total = int(mask.sum())
+    pages = max(1, -(-total // PAGE_ROWS))
+    n = min(max(int(q.get("page") or 0), 0), pages - 1)
+    q = {**q, "page": n}
+    page = out.loc[mask, cols].iloc[n * PAGE_ROWS:(n + 1) * PAGE_ROWS].fillna("").astype(str)
+    ss.table = {
+        "query": q,
+        "rows": page.to_dict("records"),
+        "total": total,
+        "offset": n * PAGE_ROWS,
+        "pages": pages,
+        "columns": cols,
+        "idCol": ss.id_col,
+        "addrCol": ss.addr_col,
+    }
 
 
 # --------------------------------------------------------------------------
-# export
+# exports
 # --------------------------------------------------------------------------
-def to_excel(main: pd.DataFrame, extra: pd.DataFrame) -> bytes:
+def to_excel(main: pd.DataFrame, review: pd.DataFrame) -> bytes:
     """Size-adaptive write. Excel caps a sheet at 1,048,576 rows."""
     buf = io.BytesIO()
     big = len(main) > 200_000
@@ -300,36 +283,100 @@ def to_excel(main: pd.DataFrame, extra: pd.DataFrame) -> bytes:
         ws.freeze_panes(1, 0)
         ws.autofilter(0, 0, max(len(main), 1), len(main.columns) - 1)
         if not big:
-            # constant_memory streams rows out as they are written, so row 0 can
-            # no longer be touched once the data is in. Only restyle when it can.
-            head = wb.add_format({"bold": True, "bg_color": "#1F3247",
-                                  "font_color": "#FFFFFF", "border": 1,
-                                  "border_color": "#2E4359"})
+            # constant_memory streams rows out as they are written, so the
+            # header can only be restyled for the in-memory path
+            head = wb.add_format({"bold": True, "bg_color": "#0F1B2D", "font_color": "#FFFFFF", "border": 1})
             for i, col in enumerate(main.columns):
                 ws.write(0, i, col, head)
-        if len(extra):
-            extra.to_excel(xl, sheet_name="EXCEPTIONS", index=False)
+        if len(review):
+            review.to_excel(xl, sheet_name="NEEDS REVIEW", index=False)
     return buf.getvalue()
 
 
-if len(out) > 1_048_575:
-    st.warning(
-        f"{len(out):,} rows exceeds the Excel sheet limit of 1,048,576. "
-        "Download as CSV instead, or split the source file."
-    )
-    st.download_button(
-        "Download CSV", out.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"AREA-BREAK_{Path(uploaded.name).stem}.csv", mime="text/csv",
-    )
-else:
-    with st.spinner("Building workbook…"):
-        xlsx = to_excel(out, exceptions)
-    st.download_button(
-        "Download Excel", xlsx,
-        file_name=f"AREA-BREAK_{Path(uploaded.name).stem}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    st.download_button(
-        "Download CSV", out.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"AREA-BREAK_{Path(uploaded.name).stem}.csv", mime="text/csv",
-    )
+def export(fmt: str, nonce: int):
+    if fmt == "reference":
+        data, name, mime = DEFAULT_REFERENCE.read_bytes(), "ph_zip_reference.csv", "text/csv"
+    else:
+        out = ss.out
+        stem = f"AREA-BREAK_{Path(ss.fname).stem}"
+        if fmt == "csv" or len(out) > 1_048_575:
+            data, name, mime = out.to_csv(index=False).encode("utf-8-sig"), f"{stem}.csv", "text/csv"
+            if fmt != "csv":
+                ss.error = {"nonce": nonce, "message": f"{len(out):,} rows is over Excel's sheet limit, so you got a CSV."}
+        else:
+            review = out[out[AUDIT_COL].ne("ZIP")]
+            data, name, mime = to_excel(out, review), f"{stem}.xlsx", XLSX_MIME
+    ss.download = {"nonce": nonce, "name": name, "mime": mime, "b64": base64.b64encode(data).decode()}
+
+
+# --------------------------------------------------------------------------
+# event handling
+# --------------------------------------------------------------------------
+def handle(ev: dict):
+    kind, nonce = ev.get("type"), ev["nonce"]
+    ss.download = None
+    ss.error = None
+
+    if kind == "upload":
+        ss.raw = base64.b64decode(ev["b64"])
+        ss.fname = ev["name"]
+        ss.sheets = sheet_names(ss.raw, ss.fname)
+        load_frame(ss.sheets[0] if ss.sheets else None)
+
+    elif kind == "select":
+        if ev.get("sheet") and ev["sheet"] != ss.sheet:
+            load_frame(ev["sheet"])
+        if ev.get("addrCol"):
+            ss.addr_col = ev["addrCol"]
+            ss.result = None
+
+    elif kind == "clear":
+        for k in ("raw", "fname", "sheets", "sheet", "df", "addr_col", "result", "out", "table", "blob"):
+            ss.pop(k, None)
+
+    elif kind == "run":
+        run({**DEFAULT_RULES, **(ev.get("rules") or {})}, nonce)
+
+    elif kind == "table" and ss.get("out") is not None:
+        query_table(ev.get("query") or {})
+
+    elif kind == "export" and (ev.get("fmt") == "reference" or ss.get("out") is not None):
+        export(ev["fmt"], nonce)
+
+    elif kind == "reference":
+        if ev.get("reset"):
+            ss.ref_custom, ss.ref_name = None, None
+        else:
+            ref = Reference.from_csv(io.BytesIO(base64.b64decode(ev["b64"])))
+            if not ref.by_zip:
+                raise ValueError("That CSV has no usable rows. It needs a ZIP CODE column with 4-digit codes.")
+            ss.ref_custom, ss.ref_name = ref, ev["name"]
+        if ss.get("result"):  # results follow the table they were built with
+            run(ss.result["settings"], nonce)
+
+
+event = ss.get("ui")
+if event and event.get("nonce") != ss.get("last_nonce"):
+    ss.last_nonce = event["nonce"]
+    try:
+        handle(event)
+    except Exception as exc:  # surface the reason in the page, never a traceback
+        ss.error = {"nonce": event["nonce"], "message": f"{type(exc).__name__}: {exc}"}
+    ss.ack = event["nonce"]
+
+
+_ui(
+    state={
+        "ack": ss.get("ack", 0),
+        "rules": DEFAULT_RULES,
+        "options": OPTIONS,
+        "reference": reference_info(current_reference(), ss.get("ref_name")),
+        "file": file_state(),
+        "result": ss.get("result"),
+        "table": ss.get("table") if ss.get("result") else None,
+        "download": ss.get("download"),
+        "error": ss.get("error"),
+    },
+    key="ui",
+    default=None,
+)
