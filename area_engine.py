@@ -232,7 +232,11 @@ def resolve_row(address, ref: Reference, use_text_fallback: bool = True):
         rec, how = ref.scan_text(norm(address))
         if rec:
             out = dict(rec)
-            out["ZIP CODE"] = z or rec["ZIP CODE"]
+            # Only report what the address actually supports: a ZIP that isn't in
+            # the text stays blank, and a province-only match has no municipality.
+            out["ZIP CODE"] = z or ""
+            if how == "TEXT-PROVINCE":
+                out["MUNICIPALITY"] = ""
             return out, z or "", how
 
     if z:
@@ -265,7 +269,7 @@ def break_addresses(
                 "AREA": rec.get(area_key, ""),
                 "MUNICIPALITY": rec.get("MUNICIPALITY", ""),
                 "FINAL AREA": final_fn(rec) if rec.get("PROVINCE") else "",
-                "ZIP CODE": (z if keep_source_zip and z else rec.get("ZIP CODE", "")),
+                "ZIP CODE": z or rec.get("ZIP CODE", ""),
                 "MATCH SOURCE": src,
             }
             cache[key] = hit
