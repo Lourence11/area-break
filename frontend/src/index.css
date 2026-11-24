@@ -1,0 +1,167 @@
+@import "tailwindcss";
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+
+/* Archivo, latin subset only, width axis 62-125% (used for the wordmark). All
+   fonts are bundled into dist/, so nothing is fetched from Google at run time. */
+@font-face {
+  font-family: "Archivo Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  src: url("@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2") format("woff2-variations");
+}
+
+/* ---------------------------------------------------------------------------
+   Tokens. Every colour in the app is one of these roles; dark mode is its own
+   set of steps, not an automatic inversion.
+   ------------------------------------------------------------------------ */
+:root {
+  color-scheme: light;
+  --paper: #f3f5f8;
+  --surface: #ffffff;
+  --sunken: #eef1f5;
+  --line: #dfe4eb;
+  --line-strong: #c6cdd8;
+  --ink: #0f1b2d;
+  --ink-2: #4a5568;
+  --ink-3: #6b778a;
+  --primary: #0f1b2d;
+  --primary-hover: #22314a;
+  --on-primary: #ffffff;
+  --marker: #f2b705;
+  --marker-soft: #fdf0c4;
+  --focus: #2a78d6;
+  --good: #0f7a55;
+  --good-soft: #e3f4ec;
+  --warn: #a95a06;
+  --warn-soft: #fcefdc;
+  --bad: #c62828;
+  --bad-soft: #fde7e7;
+  --info: #1f63b8;
+  --info-soft: #e4eefb;
+
+  /* chart: validated categorical slots 1-5 + neutrals */
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --s5: #e87ba4;
+  --s-other: #a3acb9;
+  --s-none: #d5dae2;
+  --bar: #2a78d6;
+  --bar-track: #e8eef7;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --paper: #0e141c;
+    --surface: #151c26;
+    --sunken: #1b2431;
+    --line: #263142;
+    --line-strong: #34425a;
+    --ink: #e8edf4;
+    --ink-2: #a9b4c4;
+    --ink-3: #8592a6;
+    --primary: #e8edf4;
+    --primary-hover: #ffffff;
+    --on-primary: #0f1b2d;
+    --marker: #f2b705;
+    --marker-soft: rgba(242, 183, 5, 0.16);
+    --focus: #5598e7;
+    --good: #3fc493;
+    --good-soft: rgba(63, 196, 147, 0.13);
+    --warn: #f0a43a;
+    --warn-soft: rgba(240, 164, 58, 0.13);
+    --bad: #f27272;
+    --bad-soft: rgba(242, 114, 114, 0.13);
+    --info: #6da7ec;
+    --info-soft: rgba(109, 167, 236, 0.13);
+
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --s4: #c98500;
+    --s5: #d55181;
+    --s-other: #5b6676;
+    --s-none: #313c4d;
+    --bar: #3987e5;
+    --bar-track: #1e2a3b;
+  }
+}
+
+@theme inline {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Archivo Variable", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-on-primary: var(--on-primary);
+  --color-marker: var(--marker);
+  --color-marker-soft: var(--marker-soft);
+  --color-focus: var(--focus);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-bar: var(--bar);
+  --color-bar-track: var(--bar-track);
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* the iframe grows to fit content, so nothing here may depend on viewport height */
+#root {
+  overflow: hidden;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* the yellow highlighter used to mark what was extracted from an address */
+.mark {
+  background: linear-gradient(to top, var(--marker-soft) 0 72%, transparent 72%);
+  box-shadow: inset 0 -2px 0 var(--marker);
+  border-radius: 1px;
+  padding: 0 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
